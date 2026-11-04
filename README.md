@@ -16,6 +16,7 @@ Real-world pitfalls we hit, written up so you don't have to hit them too.
 | Doc | 内容 |
 |:--|:--|
 | [coremail-imap-pitfalls.md](docs/coremail-imap-pitfalls.md) | **Five silent IMAP pitfalls of Coremail-based mailboxes** (126 / 163 / enterprise mail). The symptom is always the same: *the command returns OK but nothing happened*. Covers `SEARCH` returning sequence numbers instead of UIDs, `UID COPY` not returning `COPYUID`, `UID STORE/EXPUNGE` being silently ignored, no `MOVE` support, and `select(readonly=True)` swallowing subsequent `STORE`. 国内 Coremail 系邮箱的五个静默坑。 |
+| [multi-agent-continuity-without-shared-runtime.md](docs/multi-agent-continuity-without-shared-runtime.md) | **Multi-agent continuity without a shared runtime.** When a human can only watch a few agent sessions, the bottleneck becomes human attention. Most designs answer with a stronger global memory for the router; we externalised the state into files instead — what that bought, and what it cost (no transactions, no idempotency guarantees). Written as an independent echo of DeepSeek's Super-agent prototype, including the section on what they have that we don't. 没有共享运行时的多 agent 连续性：六个可抄的做法 + 自曝短板。 |
 
 ### `scripts/` — tools / 工具
 
@@ -23,6 +24,9 @@ Real-world pitfalls we hit, written up so you don't have to hit them too.
 |:--|:--|
 | [gh_watch.py](gh_watch.py) | **Zero-cost GitHub watcher.** Pure script, no LLM calls: watches releases/issues of chosen repos, keyword searches (issues + Discussions), and your own notifications. Silent when nothing new. 零成本 GitHub 观察器，无命中静默退出。 |
 | [mail_archive.py](scripts/mail_archive.py) | **Mailbox classifier/archiver.** Moves mail into folders by rule, with an idempotent design and a conservation check (`--dry-run` / `--apply`). 邮箱分类归档器。 |
+| [report_contract_check.py](scripts/report_contract_check.py) | **Output-shape checker for reports to a human.** "Be brief" drifts; a format contract is checkable. Enforces a fixed first line (does the reader need to act?), ordered sections, a body character cap, and forbidden tokens. Exit 1 = non-conforming. 汇报格式契约检查器。 |
+| [liveness_probe.py](scripts/liveness_probe.py) | **Silent-failure probe.** Call-level health ("did it fail three times?") cannot see a job that exits 0 and writes yesterday's numbers again. Checks the artifact on three criteria: fresh, non-empty/plausible, internally coherent. Read-only by design. 静默失效三判据体检器。 |
+| [write_lock.py](scripts/write_lock.py) | **Single-writer lock for a shared workspace.** Several sessions of one agent share a directory and cannot see each other; two of them read-modify-write the same file minutes apart. flock + TTL + stale-lock reclaim + multiple named workbenches. Exit 3 = someone else holds it, do not write. 单写者文件锁。 |
 
 ---
 
@@ -40,6 +44,10 @@ These come up in every tool here:
    **低频、静默；没有新东西就不出声。**
 5. **No secrets in code.** Tokens and credentials come from the environment.
    **凭据只走环境变量。**
+6. **Exit code 0 is not success.** A job that finishes cleanly and writes nothing is the most common production failure there is. Check the artifact — freshness, size, coherence — never the return code alone.
+   **退出码 0 不等于有产出。查产出本身：新不新、空不空、对不对。**
+7. **One writer per workspace.** Several sessions of the same agent share a directory and cannot see each other. Take a lock before any producing write; if you cannot, go read-only and report.
+   **同一工作区同一时刻只许一个写者；拿不到锁就只读 + 上报。**
 
 ---
 
@@ -70,6 +78,67 @@ export IMAP_AUTHCODE='...'        # authorization code, not your login password
 python3 scripts/mail_archive.py --dry-run   # print the plan
 python3 scripts/mail_archive.py --apply     # create folders, move, verify
 ```
+
+## `report_contract_check.py` usage
+
+```bash
+python3 scripts/report_contract_check.py --print-template > /tmp/report.md
+python3 scripts/report_contract_check.py /tmp/report.md                # exit 1 = non-conforming
+python3 scripts/report_contract_check.py /tmp/report.md --json
+cat /tmp/report.md | python3 scripts/report_contract_check.py -
+```
+
+Pass `--config contract.json` to set your own first-line pattern, required sections,
+body character cap, and forbidden patterns. Defaults are deliberately empty except
+the first-line pattern, so the tool is useless until you say what your contract is.
+
+## `liveness_probe.py` usage
+
+```bash
+python3 scripts/liveness_probe.py spec.json --explain   # human-readable
+python3 scripts/liveness_probe.py spec.json --json      # for your alerting
+python3 scripts/liveness_probe.py spec.json --quiet     # cron: silent when healthy
+```
+
+```json
+{
+  "checks": [
+    {
+      "name": "daily-report",
+      "path": "/srv/reports/daily-*.md",
+      "max_age_seconds": 93600,
+      "min_bytes": 2000,
+      "min_lines": 40,
+      "content": [{"pattern": "\\bas of \\d{4}-\\d{2}-\\d{2}\\b", "description": "carries a date stamp"}],
+      "must_contain_all": ["## Summary", "## Risks"]
+    }
+  ]
+}
+```
+
+Exit 0 = healthy, 1 = at least one unhealthy, 2 = usage error. Typical cron use:
+run it right after the producing job and alert on **exit 1**, which is the case the
+job's own exit code can never report.
+
+## `write_lock.py` usage
+
+```bash
+# main session (a human is talking to it)
+python3 scripts/write_lock.py acquire --who chat-main --role main --workbench myproj
+
+# sub session (cron / message-triggered): guard before any producing write
+python3 scripts/write_lock.py guard --who cron-42 --role sub --workbench myproj
+# rc=0 -> writable; rc=3 -> someone else holds it: read-only + report, do not write
+
+python3 scripts/write_lock.py release --who chat-main --workbench myproj
+python3 scripts/write_lock.py status  --workbench myproj
+python3 scripts/write_lock.py list
+```
+
+Lock files go to `$XDG_STATE_HOME/agent-write-lock/` (override with `--state-dir`).
+`--hold-pid <pid>` of a long-lived session makes staleness detection immediate;
+without it, staleness is decided by `--ttl` (default 1800s), so a crashed holder
+cannot deadlock the workspace forever.
 
 ---
 
