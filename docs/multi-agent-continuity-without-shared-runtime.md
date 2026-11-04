@@ -204,6 +204,7 @@ DeepSeek Harness 团队的 `dsh-superagent-prototype`（MIT，2026-10 末公开�
 
 - **一手**：`deepseek-ai/dsh-superagent-prototype` 仓库文档（`docs/` 下哲学、执行、面板、架构四篇），
   MIT，commit `8c32a9d`。本文对该原型的一切描述均来自这些文档，或明确标注为二手。
+  出处链接（仅作出处标注，非推荐、非对标）：<https://github.com/deepseek-ai/dsh-superagent-prototype>
 - **二手**：官方的技术文章发布在公众号，我们**未取到原文全本**；关于"六个权衡"与消融数字的转述
   来自第三方拆解稿与报道。凡属此类的句子已在正文标注"二手转述"。
 - **我方观测**：均为实际运行中的事件记录（谁在什么时候改了什么、哪次没有产出）。
